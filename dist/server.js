@@ -28,7 +28,8 @@ function debugLog(message, ...optionalParams) {
 /**
  * Determine the Claude CLI command/path.
  * 1. Checks for Claude CLI at the local user path: ~/.claude/local/claude.
- * 2. If not found, defaults to 'claude', relying on the system's PATH for lookup.
+ * 2. Checks common npm global install locations.
+ * 3. If not found, defaults to 'claude', relying on the system's PATH for lookup.
  */
 function findClaudeCli() {
     debugLog('[Debug] Attempting to find Claude CLI...');
@@ -42,9 +43,23 @@ function findClaudeCli() {
     else {
         debugLog(`[Debug] Claude CLI not found at local user path: ${userPath}.`);
     }
-    // 2. Fallback to 'claude' (PATH lookup)
+    // 2. Try common npm global install locations
+    const npmGlobalPaths = [
+        join(homedir(), '.npm-global', 'bin', 'claude'),
+        join(homedir(), '.npm', 'bin', 'claude'),
+        '/usr/local/bin/claude',
+        '/opt/homebrew/bin/claude' // For macOS with Homebrew
+    ];
+    for (const npmPath of npmGlobalPaths) {
+        debugLog(`[Debug] Checking for Claude CLI at: ${npmPath}`);
+        if (existsSync(npmPath)) {
+            debugLog(`[Debug] Found Claude CLI at npm global path: ${npmPath}. Using this path.`);
+            return npmPath;
+        }
+    }
+    // 3. Fallback to 'claude' (PATH lookup)
     debugLog('[Debug] Falling back to "claude" command name, relying on spawn/PATH lookup.');
-    console.warn('[Warning] Claude CLI not found at ~/.claude/local/claude. Falling back to "claude" in PATH. Ensure it is installed and accessible.');
+    console.warn('[Warning] Claude CLI not found at common locations. Falling back to "claude" in PATH. Ensure it is installed and accessible.');
     return 'claude';
 }
 // Cache for Roo modes configuration to improve performance
@@ -356,7 +371,7 @@ class ClaudeCodeServer {
                 // Check if Claude CLI is accessible
                 let claudeCliStatus = 'unknown';
                 try {
-                    const { stdout } = await spawnAsync('/bin/bash', [this.claudeCliPath, '--version'], { timeout: 5000 });
+                    const { stdout } = await spawnAsync(this.claudeCliPath, ['--version'], { timeout: 5000 });
                     claudeCliStatus = 'available';
                 }
                 catch (error) {
@@ -568,7 +583,7 @@ ${returnMode === 'summary' ? 'IMPORTANT: Keep your response concise and focused 
             }
             try {
                 debugLog(`[Debug] Attempting to execute Claude CLI with prompt: "${prompt}" in CWD: "${effectiveCwd}"`);
-                let claudeProcessArgs = [this.claudeCliPath, '--dangerously-skip-permissions'];
+                let claudeProcessArgs = ['--dangerously-skip-permissions'];
                 // Handle Roo mode selection if enabled and specified
                 if (useRooModes && mode) {
                     // Load room modes configuration
@@ -593,17 +608,27 @@ ${returnMode === 'summary' ? 'IMPORTANT: Keep your response concise and focused 
                         debugLog(`[Warning] Roo modes configuration not found or invalid`);
                     }
                 }
-                // Add the prompt
-                claudeProcessArgs.push('-p', prompt);
-                debugLog(`[Debug] Invoking /bin/bash with args: ${claudeProcessArgs.join(' ')}`);
+                // Escape the prompt for shell execution
+                // Use single quotes and escape any single quotes in the prompt
+                const escapedPrompt = prompt.replace(/'/g, "'\"'\"'");
+                // Add the prompt with proper shell escaping
+                claudeProcessArgs.push('-p', escapedPrompt);
+                debugLog(`[Debug] Invoking Claude CLI with escaped prompt`);
+                debugLog(`[Debug] Command: ${this.claudeCliPath} ${claudeProcessArgs.map((arg, i) => {
+                    // For debug logging, show truncated prompt
+                    if (i === claudeProcessArgs.indexOf(escapedPrompt)) {
+                        return `'${arg.slice(0, 50)}...'`;
+                    }
+                    return arg;
+                }).join(' ')}`);
                 // Use retry for robust execution
                 const { stdout, stderr } = await retry(async (bail, attemptNumber) => {
                     try {
                         if (attemptNumber > 1) {
                             debugLog(`[Retry] Attempt ${attemptNumber}/${maxRetries + 1} for Claude CLI execution`);
                         }
-                        return await spawnAsync('/bin/bash', // Explicitly use /bin/bash as the command
-                        claudeProcessArgs, // Pass the script path as the first argument to bash
+                        return await spawnAsync(this.claudeCliPath, // Use the claude CLI directly, not through bash
+                        claudeProcessArgs, // Pass all args
                         { timeout: executionTimeoutMs, cwd: effectiveCwd });
                     }
                     catch (err) {
